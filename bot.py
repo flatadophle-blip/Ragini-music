@@ -1,143 +1,176 @@
 import os
 import asyncio
 import yt_dlp
+import traceback
+from telethon import TelegramClient, events, Button
 
-from telethon import TelegramClient, events
-from telethon.sessions import StringSession
-
-from youtubesearchpython import VideosSearch
-
-from pytgcalls import GroupCallFactory
-
-
-# ================= CONFIG =================
-
-# ================= CONFIG =================
-
+# ================= CREDENTIALS =================
 API_ID = 34848798
-
 API_HASH = "210df233d07183ee955143092259dabb"
-
 BOT_TOKEN = "8713743302:AAG4OVhU43PyoTvU5O5WSdfXZ1-jq5nPJc8"
 
-SESSION_STRING = "BQITwB4ATkSfrgXp2qnil8weWS-7i_tFdD5pAN2sPX4BmZASg6oPYGdKt0IUQ7SjcqP-8UCW3RqsznyBYpAENw1ZJEkD5hAdd-epvTwVRkdei1Dfmw6FEh45Bm4If5XJZaq10Qot5aWa9yks9b0xQa7P9Ntb7EITWCk3OK1pszYifM_0Noe3VwSns7GhViOxm1PpWRtzb5vqY3mj9iqblOo62IQ8UGBZjYM7x7FbopQOKUOVmmSVEhr2KxK3chyda60EwjfE5PFltlBfGwZDVAm2pKQjeH_UBNxAnV2wgcEpzfWHGpYZisjUZqVi5Fag5IZ0PJhvwIjSMUwRiF3-_UAdu-NXpAAAAAGqkXGbAA"
-
 DOWNLOAD_DIR = "downloads"
-
-# =========================================
-
-# =========================================
-
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-client = TelegramClient(
-    StringSession(STRING_SESSION),
-    API_ID,
-    API_HASH
-)
+bot = TelegramClient("ragini_music_bot", API_ID, API_HASH)
 
-group_call = GroupCallFactory(
-    client,
-    GroupCallFactory.MTPROTO_CLIENT_TYPE.TELETHON
-).get_group_call()
-
-
-# ================= SEARCH =================
-
-def search_youtube(query):
-
-    results = VideosSearch(query, limit=1).result()
-
-    if not results["result"]:
-        return None, None
-
-    video = results["result"][0]
-
-    return video["link"], video["title"]
-
-
-# ================= DOWNLOAD =================
-
-def download_audio(url):
-
-    ydl_opts = {
-        "format": "bestaudio",
-        "outtmpl": f"{DOWNLOAD_DIR}/%(title)s.%(ext)s",
+# ================= YT-DLP OPTIONS WITH COOKIES =================
+def get_ydl_opts():
+    return {
         "quiet": True,
-        "noplaylist": True,
+        "no_warnings": True,
+        "extract_flat": True,
+        "default_search": "ytsearch",
+        "cookiefile": "cookies.txt" if os.path.exists("cookies.txt") else None,
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-
-        info = ydl.extract_info(url, download=True)
-
-        return ydl.prepare_filename(info)
-
-
-# ================= PLAY =================
-
-@client.on(events.NewMessage(pattern=r"^/play (.+)"))
-async def play_handler(event):
-
-    query = event.pattern_match.group(1)
-
-    msg = await event.reply("🔍 Searching...")
-
+# ================= SEARCH =================
+def search_songs(query, limit=6):
     try:
-
-        if "youtube.com" in query or "youtu.be" in query:
-            url = query
-            title = "YouTube Audio"
-
-        else:
-            url, title = search_youtube(query)
-
-            if not url:
-                return await msg.edit("❌ Song not found")
-
-        await msg.edit("⬇ Downloading...")
-
-        loop = asyncio.get_event_loop()
-
-        file_path = await loop.run_in_executor(
-            None,
-            download_audio,
-            url
-        )
-
-        await msg.edit("📞 Joining VC...")
-
-        await group_call.start(event.chat_id)
-
-        group_call.input_filename = file_path
-
-        await msg.edit(f"▶️ Playing:\n{title}")
-
+        with yt_dlp.YoutubeDL(get_ydl_opts()) as ydl:
+            info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
+            results = []
+            for entry in info.get("entries", []):
+                if entry:
+                    results.append({
+                        "title": entry.get("title", "Unknown"),
+                        "url": f"https://youtube.com/watch?v={entry['id']}",
+                        "duration": entry.get("duration_string", "N/A"),
+                        "channel": entry.get("uploader", "Unknown"),
+                        "views": entry.get("view_count", "N/A"),
+                    })
+            return results
     except Exception as e:
-        await msg.edit(f"❌ Error:\n{str(e)}")
+        print(f"Search Error: {e}")
+        return []
 
-
-# ================= STOP =================
-
-@client.on(events.NewMessage(pattern=r"^/stop$"))
-async def stop_handler(event):
-
+# ================= DOWNLOAD =================
+async def download_audio_and_thumb(url, title):
     try:
+        print(f"⬇️ Downloading: {title}")
+        def _download():
+            ydl_opts = {
+                "format": "bestaudio/best",
+                "outtmpl": f"{DOWNLOAD_DIR}/%(title)s.%(ext)s",
+                "quiet": True,
+                "noplaylist": True,
+                "writethumbnail": True,
+                "cookiefile": "cookies.txt" if os.path.exists("cookies.txt") else None,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                filename = ydl.prepare_filename(info)
+                thumb = filename.rsplit(".", 1)[0] + ".webp"
+                return filename, thumb if os.path.exists(thumb) else None
 
-        await group_call.stop()
-
-        await event.reply("⏹ Stopped")
-
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _download)
     except Exception as e:
-        await event.reply(str(e))
-
+        print(f"❌ Download Error: {e}")
+        traceback.print_exc()
+        return None, None
 
 # ================= START =================
+@bot.on(events.NewMessage(pattern="/start"))
+async def start(event):
+    cookie_status = "✅ Cookies Loaded" if os.path.exists("cookies.txt") else "⚠️ cookies.txt not found (may get blocked)"
+    await event.reply(f"""
+╔════════════════════════════╗
+       🌸 **RAGINI MUSIC** 🌸
+╚════════════════════════════╝
 
-print("================================")
-print(" VC MUSIC USERBOT STARTED ")
-print("================================")
+**Ultra Premium Music Bot**
 
-client.start()
+{cookie_status}
 
-client.run_until_disconnected()
+**Command:** `/play song name`
+
+Made with 💖
+    """)
+
+# ================= /PLAY & BUTTON HANDLER (same as before) =================
+@bot.on(events.NewMessage(pattern=r"/play(?:\s+(.+))?"))
+async def play(event):
+    query = event.pattern_match.group(1)
+    if not query:
+        return await event.reply("**Usage:** `/play song name`")
+
+    msg = await event.reply("🌸 **Searching in Ragini Music...** ✨")
+
+    results = search_songs(query)
+
+    if not results:
+        return await msg.edit("❌ **No results found!**\nTry different spelling.")
+
+    buttons = []
+    for i, song in enumerate(results):
+        short = (song["title"][:35] + "…") if len(song["title"]) > 35 else song["title"]
+        buttons.append([Button.inline(f"🎵 {short}", f"dl_{i}")])
+
+    await msg.edit(
+        f"**🌸 RAGINI MUSIC 🌸**\n\n**Results for:** `{query}`\n\n**Select song:**",
+        buttons=buttons
+    )
+
+    if not hasattr(bot, "cache"):
+        bot.cache = {}
+    bot.cache[msg.id] = results
+
+@bot.on(events.CallbackQuery())
+async def callback(event):
+    data = event.data.decode()
+    if not data.startswith("dl_"):
+        return
+
+    index = int(data.split("_")[1])
+    results = bot.cache.get(event.message_id)
+    if not results or index >= len(results):
+        return await event.answer("Search expired!", alert=True)
+
+    song = results[index]
+    status = await event.edit("⬇️ **Downloading...**")
+
+    try:
+        file_path, thumb_path = await download_audio_and_thumb(song["url"], song["title"])
+        if not file_path:
+            return await status.edit("❌ Download failed!")
+
+        await status.edit("📤 **Uploading...**")
+
+        caption = f"""
+**🌸 RAGINI MUSIC 🌸**
+
+**🎵 Title:** `{song['title']}`
+**⏱ Duration:** `{song['duration']}`
+**📺 Channel:** `{song['channel']}`
+
+**Enjoy 💕**
+        """.strip()
+
+        await bot.send_file(
+            event.chat_id,
+            file=file_path,
+            caption=caption,
+            thumb=thumb_path,
+            force_document=False
+        )
+
+        await status.delete()
+
+        # Cleanup
+        for f in [file_path, thumb_path]:
+            if f and os.path.exists(f):
+                os.remove(f)
+
+    except Exception as e:
+        await status.edit("❌ Download failed. Try again.")
+
+# ================= RUN =================
+async def main():
+    await bot.start(bot_token=BOT_TOKEN)
+    print("✅ RAGINI MUSIC BOT STARTED!")
+    print("Put cookies.txt in same folder for best results")
+    await bot.run_until_disconnected()
+
+if __name__ == "__main__":
+    asyncio.run(main())
